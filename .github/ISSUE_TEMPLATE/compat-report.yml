@@ -1,0 +1,90 @@
+name: Compatibility report
+description: Laporkan apakah build jalan (atau nggak) di device kamu. Tanpa PC pun bisa — lihat docs/DEVICE-TEST.md.
+title: "[Compat] <model HP> — <jalan/tidak>"
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Laporan kamu masuk ke tabel perangkat teruji. Makin detail, makin berguna.
+        **Jangan pakai issue ini buat bug rendering umum** — pakai issue biasa.
+
+  - type: input
+    id: device
+    attributes:
+      label: Model HP / tablet
+      placeholder: "contoh: Samsung Galaxy Tab S7 FE (SM-T733)"
+    validations:
+      required: true
+
+  - type: input
+    id: soc
+    attributes:
+      label: SoC & GPU
+      placeholder: "contoh: Snapdragon 778G / Adreno 642L"
+    validations:
+      required: true
+
+  - type: input
+    id: android
+    attributes:
+      label: Versi Android
+      placeholder: "contoh: Android 14 (API 34)"
+    validations:
+      required: true
+
+  - type: input
+    id: vulkan
+    attributes:
+      label: Versi Vulkan (dari AIDA64 / DevCheck)
+      placeholder: "contoh: Vulkan 1.3 — atau 'tidak ada' kalau kosong"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: variant
+    attributes:
+      label: Varian APK yang dites
+      options:
+        - arm64 full
+        - arm64 lite
+        - armeabi-v7a (legacy)
+        - x86_64
+        - belum tahu / lain-lain
+    validations:
+      required: true
+
+  - type: input
+    id: apk_version
+    attributes:
+      label: Versi/nama artifact APK
+      placeholder: "contoh: blender-android-arm64 dari run #12 / nama file APK"
+    validations:
+      required: true
+
+  - type: textarea
+    id: results
+    attributes:
+      label: Hasil checklist
+      description: Ikuti checklist di docs/DEVICE-TEST.md. Boleh singkat.
+      value: |
+        - Startup (sampai viewport tampil):
+        - Buka & simpan file .blend:
+        - Navigasi viewport (FPS terasa):
+        - Modeling ringan / sculpt:
+        - Material (Principled BSDF tidak hitam):
+        - Render EEVEE:
+        - Render Cycles (CPU):
+        - Audio:
+        - Termal setelah 10 menit:
+        - Stylus (kalau ada):
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Catatan tambahan / screenshot / pesan error
+      description: Satu screenshot lebih berguna daripada tiga paragraf. Kalau app mati, sebutkan langkah ke berapa.
+    validations:
+      required: false

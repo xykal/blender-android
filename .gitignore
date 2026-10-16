@@ -1,0 +1,32 @@
+# Build output & artifact
+out/
+*.apk
+*.aab
+build_android/
+build_android_*/
+blender/
+deps_*/
+
+# Patch hasil generate (boleh disimpan sengaja di rilis, tapi jangan di repo source)
+porting-*.patch
+upstream-commit-*.txt
+
+# Lokal
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+# ===== KEAMANAN: jangan pernah commit kredensial =====
+env.txt
+*.env
+.env
+.env.*
+uploads/
+secrets*
+*credentials*
+*.pem
+*.key
+*.keystore
+*.jks

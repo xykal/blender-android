@@ -1,0 +1,212 @@
+# Cross-compile Blender untuk Android — jalan di GitHub Actions (tanpa build lokal).
+#
+# Cara pakai: Actions → "android-build" → Run workflow → pilih ABI.
+# APK muncul sebagai artifact. Tidak butuh secret apa pun (release build di-sign
+# dengan debug keystore, lihat release/android/app/build.gradle di source Blender).
+
+name: android-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: "ABI yang dibangun"
+        type: choice
+        options: [arm64, x64, armv7, all]
+        default: arm64
+      minsdk:
+        description: "Turunkan minSdk ke API level ini (kosongkan = default upstream 29 / Android 10)"
+        type: choice
+        options: ["", "28", "27"]
+        default: ""
+      lite:
+        description: "Profil Lite (buang video/USD/exchange format) - belum diimplementasi"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ⚠️ Verifikasi versi NDK yang diharapkan upstream:
+  #    grep -rn "NDK" blender/build_files/build_environment/cmake/check_software.cmake
+  NDK_VERSION: "r28b"
+  BLENDER_REPO: "https://projects.blender.org/blender/blender.git"
+  BLENDER_REF: "android"
+  ANDROID_PLATFORM_VERSION: "36"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Uji cepat script patch (detik, tanpa compile) — biar CI gagal cepat kalau
+  # logika patch rusak, sebelum menghabiskan 1-3 jam build.
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: port
+      - name: Uji apply-port-patches.py (30 assertion)
+        run: python3 port/scripts/tests/run_tests.py
+
+  # ---------------------------------------------------------------------------
+  # Tentukan daftar ABI yang dibangun
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      abis: ${{ steps.set.outputs.abis }}
+    steps:
+      - id: set
+        run: |
+          ABI="${{ github.event_name == 'workflow_dispatch' && inputs.abi || 'arm64' }}"
+          case "$ABI" in
+            all)    echo 'abis=["arm64","x64"]' >> "$GITHUB_OUTPUT" ;;   # armv7 terpisah: butuh iterasi deps ARM 32-bit (jalankan sendiri)
+            armv7)  echo 'abis=["armv7"]'       >> "$GITHUB_OUTPUT" ;;
+            x64)    echo 'abis=["x64"]'         >> "$GITHUB_OUTPUT" ;;
+            *)      echo 'abis=["arm64"]'       >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  # ---------------------------------------------------------------------------
+  build:
+    needs: [plan, selftest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: ${{ fromJSON(needs.plan.outputs.abis) }}
+    name: blender-android-${{ matrix.abi }}
+    # armv7 masih dalam tahap iterasi (deps ARM 32-bit). Kegagalannya tidak
+    # menghentikan job lain, dan log-nya tetap di-dump untuk dijadikan patch.
+    continue-on-error: ${{ matrix.abi == 'armv7' }}
+
+
+    steps:
+      - name: Bebaskan disk (build ini butuh puluhan GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      # 1) Repo kita (patch + script)
+      - name: Checkout repo port
+        uses: actions/checkout@v4
+        with:
+          path: port
+
+      # 2) Source Blender dari upstream (branch android) + submodule precompiled libs
+      - name: Checkout Blender (${{ env.BLENDER_REF }})
+        run: |
+          # CATATAN: kalau `git submodule update` gagal (misal "fatal: reference is not a tree"),
+          # hapus flag --depth 1 supaya clone penuh. Blender punya beberapa submodule.
+          git clone --depth 1 -b "$BLENDER_REF" "$BLENDER_REPO" blender
+          cd blender
+          git submodule update --init --recursive   # ini yang menarik lib/android_arm64 & android_x64
+          echo "Commit upstream: $(git rev-parse HEAD)"
+
+      # 3) Patch. arm64/x64 = no-op. armv7 = patch ABI 32-bit. minsdk = turunkan Android minimum.
+      - name: Terapkan patch port
+        run: |
+          ARGS="--blender blender --abi ${{ matrix.abi }}"
+          MINSDK="${{ github.event_name == 'workflow_dispatch' && inputs.minsdk || '' }}"
+          if [ -n "$MINSDK" ]; then
+            ARGS="$ARGS --minsdk $MINSDK"
+          fi
+          echo "Menjalankan: apply-port-patches.py $ARGS"
+          python3 port/scripts/apply-port-patches.py $ARGS
+
+      # 4) Toolchain
+      - name: Setup Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          curl -sSLo ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q ndk.zip -d "$HOME"
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: "Setup Android SDK (Gradle butuh compileSdk 36)"
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-${ANDROID_PLATFORM_VERSION} build-tools;${ANDROID_PLATFORM_VERSION}.0.0 platform-tools"
+
+      - name: Setup Java 17 (AGP butuh JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 5) Cache dependencies.
+      # CATATAN: deps Blender besar (bisa >5 GB). Batas cache repo GitHub = 10 GB.
+      # Kalau cache selalu gagal / kepenuhan, hapus step ini saja (build jadi lebih lama, tetap jalan).
+      - name: Cache dependencies Android
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: blender/build_android/deps_${{ matrix.abi == 'arm64' && 'arm64' || matrix.abi == 'x64' && 'x64' || 'armv7' }}
+          key: deps-${{ matrix.abi }}-${{ hashFiles('blender/build_files/build_environment/**') }}
+
+      - name: "Build dependencies (lama: bisa 1-2 jam)"
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        working-directory: blender
+        run: |
+          case "${{ matrix.abi }}" in
+            arm64) make deps android ;;
+            x64)   make deps android x64 ;;
+            armv7) make deps android armv7 ;;   # profil Lite: Embree/OIDN/USD/MaterialX/OpenVDB/Alembic dilewati
+          esac
+
+      - name: Build Blender
+        working-directory: blender
+        run: |
+          case "${{ matrix.abi }}" in
+            arm64) make android ;;
+            x64)   make android x64 ;;
+            armv7) make android armv7 lite ;;   # 'lite' = pasangan wajib dari profil deps armv7
+          esac
+
+      # Khusus armv7: kalau build gagal, log deps ini yang memberi tahu resep mana yang harus dipatch.
+      - name: Dump log deps (kalau gagal)
+        if: failure()
+        run: |
+          echo "=== mencari log deps ==="
+          find blender/build_android -maxdepth 4 -name "*.log" 2>/dev/null | head -n 20
+          for f in $(find blender/build_android -name "*-build-*.log" 2>/dev/null | head -n 3); do
+            echo "=== $f (200 baris terakhir) ==="
+            tail -n 200 "$f"
+          done
+          echo "=== CMakeError / Output log ==="
+          find blender/build_android \( -name "CMakeError.log" -o -name "CMakeOutput.log" \) 2>/dev/null | head -n 5
+
+      - name: Assemble APK (target gradle_assemble)
+        working-directory: blender
+        run: |
+          BUILD_DIR="$(find . -maxdepth 1 -type d -name 'build_android*' | head -n1)"
+          echo "Build dir: $BUILD_DIR"
+          test -n "$BUILD_DIR"
+          cmake --build "$BUILD_DIR" --target gradle_assemble
+          find "$BUILD_DIR" -name "*.apk" -print
+
+      - name: Kumpulkan APK
+        run: |
+          mkdir -p out
+          find blender -name "*.apk" -exec cp {} out/ \;
+          ls -lh out/
+
+      # 6) Kepatuhan GPLv3: setiap build menghasilkan patch source-nya sendiri.
+      #    Ini yang wajib kamu publikasikan kalau kamu rilis APK.
+      - name: Generate source patch (GPL)
+        run: |
+          cd blender
+          git add -A >/dev/null 2>&1 || true
+          git diff --cached > "../out/porting-${{ matrix.abi }}.patch" || true
+          git rev-parse HEAD > "../out/upstream-commit-${{ matrix.abi }}.txt"
+          cd ..
+          ls -lh out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-android-${{ matrix.abi }}
+          path: out/*
+          retention-days: 14
